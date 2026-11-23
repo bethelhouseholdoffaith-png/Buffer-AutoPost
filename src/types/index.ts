@@ -53,6 +53,101 @@ export interface KeyStatus {
   hasGeminiKey: boolean;
 }
 
+export type UserRole = 'user' | 'admin';
+export type UserStatus = 'active' | 'suspended';
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  displayName: string;
+  role: UserRole;
+  status: UserStatus;
+  hasSeenWelcome: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastLoginAt: number | null;
+}
+
+export interface UserPreferences {
+  appName: string;
+  appSubtitle: string;
+  avatarUrl: string;
+  theme: 'black' | 'charcoal' | 'light';
+  liquidGlass: boolean;
+  sidebarCollapsed: boolean;
+}
+
+export interface SessionInfo {
+  id: string;
+  userAgent: string;
+  ipAddress: string;
+  createdAt: number;
+  lastActiveAt: number;
+  expiresAt: number;
+  isCurrent: boolean;
+}
+
+export interface CloudScheduledPost {
+  id: string;
+  bufferPostIds?: Record<string, string>;
+  channelId: string;
+  channelName: string;
+  service: string;
+  avatar?: string;
+  time: string;
+  title: string;
+  dateKey: string;
+  videoUrl?: string;
+  platformOptions?: PlatformPostOptions;
+}
+
+export interface AuthSnapshot {
+  authenticated: boolean;
+  needsAdminBootstrap?: boolean;
+  isNewUser?: boolean;
+  user?: AuthUser;
+  preferences?: UserPreferences;
+  keyStatus?: KeyStatus;
+  channels?: BufferChannel[];
+  scheduledPosts?: CloudScheduledPost[];
+}
+
+export interface AdminStats {
+  totalUsers: number;
+  activeUsers: number;
+  suspendedUsers: number;
+  activeAdmins: number;
+  newRegistrations7d: number;
+  activeSessions: number;
+  totalScheduledPosts: number;
+}
+
+export interface AdminUserSummary {
+  id: string;
+  email: string;
+  displayName: string;
+  role: UserRole;
+  status: UserStatus;
+  createdAt: number;
+  lastLoginAt: number | null;
+  hasBufferKey: boolean;
+  hasGeminiKey: boolean;
+  activeSessions: number;
+  postCount: number;
+}
+
+export interface AdminAuditLog {
+  id: string;
+  actorUserId: string | null;
+  actorEmail: string | null;
+  action: string;
+  targetUserId: string | null;
+  targetEmail: string | null;
+  details?: Record<string, unknown>;
+  ipAddress: string | null;
+  createdAt: number;
+}
+
 export interface PlatformPostOptions {
   youtube?: {
     playlist?: string;

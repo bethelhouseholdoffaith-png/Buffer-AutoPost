@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 
+export const SESSION_COOKIE_NAME = 'autobuffer_session';
 export const BUFFER_COOKIE_NAME = 'autobuffer_buffer_key';
 export const GEMINI_COOKIE_NAME = 'autobuffer_gemini_key';
 
@@ -41,12 +42,32 @@ function buildCookieHeader(
   const parts = [`${name}=${encoded}`, 'Path=/', 'HttpOnly', `Max-Age=${maxAgeSeconds}`];
 
   if (isHttpsRequest(req)) {
-    // Support embedded iframe previews and same-origin HTTPS requests safely
+    // Support cross-site GitHub Pages + HTTPS backend and embedded iframe previews safely
     parts.push('Secure', 'SameSite=None', 'Partitioned');
   } else {
     parts.push('SameSite=Lax');
   }
   return parts.join('; ');
+}
+
+export function setSessionCookie(req: Request, res: Response, rawToken: string) {
+  const headerVal = buildCookieHeader(
+    SESSION_COOKIE_NAME,
+    rawToken,
+    req,
+    Math.floor(THIRTY_DAYS_MS / 1000)
+  );
+  res.append('Set-Cookie', headerVal);
+}
+
+export function clearSessionCookie(req: Request, res: Response) {
+  const headerVal = buildCookieHeader(SESSION_COOKIE_NAME, '', req, 0);
+  res.append('Set-Cookie', headerVal);
+}
+
+export function getSessionTokenFromReq(req: Request): string {
+  const cookies = parseCookies(req);
+  return (cookies[SESSION_COOKIE_NAME] || '').trim();
 }
 
 export function setKeyCookie(req: Request, res: Response, name: string, value: string) {

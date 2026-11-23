@@ -8,10 +8,7 @@ import dotenv from 'dotenv';
 import {
   BUFFER_COOKIE_NAME,
   GEMINI_COOKIE_NAME,
-  setKeyCookie,
   clearKeyCookie,
-  getBufferKeyFromReq,
-  getGeminiKeyFromReq,
   verifySameOriginCsrf,
   getAllowedCorsOrigins,
   redactSecrets,
@@ -33,6 +30,15 @@ import {
   GeminiServiceError,
   PREFERRED_GEMINI_VIDEO_MODEL,
 } from './server/geminiService.js';
+import {
+  getUserCredentials,
+  initDatabase,
+  replaceUserChannels,
+  setUserBufferToken,
+  setUserGeminiKey,
+} from './server/db.js';
+import { attachAuthContext, registerAuthRoutes, requireAuth } from './server/authRoutes.js';
+import { registerAdminRoutes } from './server/adminRoutes.js';
 
 dotenv.config();
 
@@ -67,6 +73,7 @@ const ALLOWED_VIDEO_EXTS = new Set([
 
 interface MediaUploadRecord {
   uploadId: string;
+  ownerUserId: string;
   mediaToken: string;
   filePath: string;
   originalName: string;
@@ -148,6 +155,13 @@ app.use('/api', (req, res, next) => {
 // Protect all state-changing API routes against CSRF
 app.use('/api', verifySameOriginCsrf);
 
+// Attach authenticated user + session context from HttpOnly session cookie
+app.use('/api', attachAuthContext);
+
+// Register Authentication, Account Settings, Cloud Sync & Admin Routes
+registerAuthRoutes(app);
+registerAdminRoutes(app);
+
 function buildPublicMediaUrl(req: express.Request, uploadId: string, mediaToken: string): string {
   const host = req.get('x-forwarded-host') || req.get('host') || 'localhost:3000';
   const protoHeader = String(req.headers['x-forwarded-proto'] || req.protocol || 'http');
@@ -162,7 +176,14 @@ function buildPublicMediaUrl(req: express.Request, uploadId: string, mediaToken:
 app.get('/api/media/:uploadId/:token', (req, res) => {
   const { uploadId, token } = req.params;
   const record = mediaRegistry.get(uploadId);
-  if (!record || record.mediaToken !== token) {
+  const expectedBuf = record ? Buffer.from(record.mediaToken) : null;
+  const actualBuf = Buffer.from(String(token || ''));
+  if (
+    !record ||
+    !expectedBuf ||
+    expectedBuf.length !== actualBuf.length ||
+    !crypto.timingSafeEqual(expectedBuf, actualBuf)
+  ) {
     return res.status(404).json({ error: 'Media asset not found or expired.' });
   }
 
@@ -177,16 +198,18 @@ app.get('/api/media/:uploadId/:token', (req, res) => {
 });
 
 // ==========================================
-// 1. Key Status & HttpOnly Cookie Vault Routes
+// 1. Key Status & Encrypted Database Vault Routes (Per-User)
 // ==========================================
 
-app.get('/api/keys/status', (req, res) => {
-  const hasBufferKey = Boolean(getBufferKeyFromReq(req));
-  const hasGeminiKey = Boolean(getGeminiKeyFromReq(req));
-  return res.json({ hasBufferKey, hasGeminiKey });
+app.get('/api/keys/status', requireAuth, async (req, res) => {
+  const creds = await getUserCredentials(req.authUser!.id);
+  return res.json({
+    hasBufferKey: Boolean(creds.bufferToken),
+    hasGeminiKey: Boolean(creds.geminiKey),
+  });
 });
 
-app.post('/api/keys/buffer', async (req, res) => {
+app.post('/api/keys/buffer', requireAuth, async (req, res) => {
   const rawToken = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
   const cleanedToken = rawToken.toLowerCase().startsWith('bearer ')
     ? rawToken.slice(7).trim()
@@ -201,7 +224,8 @@ app.post('/api/keys/buffer', async (req, res) => {
 
   try {
     const bootstrap = await fetchBufferBootstrap(cleanedToken, { forceRefresh: true });
-    setKeyCookie(req, res, BUFFER_COOKIE_NAME, cleanedToken);
+    await setUserBufferToken(req.authUser!.id, cleanedToken);
+    await replaceUserChannels(req.authUser!.id, bootstrap.channels);
     return res.json({
       success: true,
       organizations: bootstrap.organizations,
@@ -224,7 +248,7 @@ app.post('/api/keys/buffer', async (req, res) => {
   }
 });
 
-app.post('/api/keys/gemini', async (req, res) => {
+app.post('/api/keys/gemini', requireAuth, async (req, res) => {
   const rawKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
   if (!rawKey) {
     return res.status(400).json({
@@ -235,7 +259,7 @@ app.post('/api/keys/gemini', async (req, res) => {
 
   try {
     const verified = await validateGeminiApiKey(rawKey);
-    setKeyCookie(req, res, GEMINI_COOKIE_NAME, rawKey);
+    await setUserGeminiKey(req.authUser!.id, rawKey);
     return res.json({ success: true, model: verified.model });
   } catch (err: any) {
     const status = err instanceof GeminiServiceError ? err.httpStatus : 401;
@@ -253,29 +277,35 @@ app.post('/api/keys/gemini', async (req, res) => {
   }
 });
 
-app.post('/api/keys/clear', (req, res) => {
+app.post('/api/keys/clear', requireAuth, async (req, res) => {
   const target = req.body?.target || 'all';
+  const prevCreds = await getUserCredentials(req.authUser!.id);
+
   if (target === 'buffer' || target === 'all') {
-    const prevBuffer = getBufferKeyFromReq(req);
-    if (prevBuffer) invalidateBufferSessionCache(prevBuffer);
+    if (prevCreds.bufferToken) invalidateBufferSessionCache(prevCreds.bufferToken);
+    await setUserBufferToken(req.authUser!.id, null);
+    await replaceUserChannels(req.authUser!.id, []);
     clearKeyCookie(req, res, BUFFER_COOKIE_NAME);
   }
   if (target === 'gemini' || target === 'all') {
+    await setUserGeminiKey(req.authUser!.id, null);
     clearKeyCookie(req, res, GEMINI_COOKIE_NAME);
   }
+
+  const nextCreds = await getUserCredentials(req.authUser!.id);
   return res.json({
     success: true,
-    hasBufferKey: target === 'gemini' ? Boolean(getBufferKeyFromReq(req)) : false,
-    hasGeminiKey: target === 'buffer' ? Boolean(getGeminiKeyFromReq(req)) : false,
+    hasBufferKey: Boolean(nextCreds.bufferToken),
+    hasGeminiKey: Boolean(nextCreds.geminiKey),
   });
 });
 
 // ==========================================
-// 2. Buffer GraphQL Proxy Routes (No REST v1)
+// 2. Buffer GraphQL Proxy Routes (Authenticated & Per-User Encrypted Key)
 // ==========================================
 
-app.get('/api/buffer/bootstrap', async (req, res) => {
-  const token = getBufferKeyFromReq(req);
+app.get('/api/buffer/bootstrap', requireAuth, async (req, res) => {
+  const { bufferToken: token } = await getUserCredentials(req.authUser!.id);
   if (!token) {
     return res.status(401).json({ success: false, error: 'Buffer API key is not connected.' });
   }
@@ -283,6 +313,7 @@ app.get('/api/buffer/bootstrap', async (req, res) => {
   try {
     const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
     const data = await fetchBufferBootstrap(token, { forceRefresh });
+    await replaceUserChannels(req.authUser!.id, data.channels);
     return res.json({
       success: true,
       organizations: data.organizations,
@@ -300,8 +331,8 @@ app.get('/api/buffer/bootstrap', async (req, res) => {
   }
 });
 
-app.get('/api/buffer/channels', async (req, res) => {
-  const token = getBufferKeyFromReq(req);
+app.get('/api/buffer/channels', requireAuth, async (req, res) => {
+  const { bufferToken: token } = await getUserCredentials(req.authUser!.id);
   if (!token) {
     return res.status(401).json({ success: false, error: 'Buffer API key is not connected.' });
   }
@@ -309,6 +340,7 @@ app.get('/api/buffer/channels', async (req, res) => {
   try {
     const forceRefresh = req.query.refresh === '1';
     const data = await fetchBufferBootstrap(token, { forceRefresh });
+    await replaceUserChannels(req.authUser!.id, data.channels);
     return res.json({
       success: true,
       channels: data.channels,
@@ -322,8 +354,8 @@ app.get('/api/buffer/channels', async (req, res) => {
   }
 });
 
-app.get('/api/buffer/schedule', async (req, res) => {
-  const token = getBufferKeyFromReq(req);
+app.get('/api/buffer/schedule', requireAuth, async (req, res) => {
+  const { bufferToken: token } = await getUserCredentials(req.authUser!.id);
   if (!token) {
     return res.status(401).json({ success: false, error: 'Buffer API key is not connected.' });
   }
@@ -350,8 +382,9 @@ app.get('/api/buffer/schedule', async (req, res) => {
   }
 });
 
-app.post('/api/buffer/posts', async (req, res) => {
-  const token = getBufferKeyFromReq(req);
+app.post('/api/buffer/posts', requireAuth, async (req, res) => {
+  const creds = await getUserCredentials(req.authUser!.id);
+  const token = creds.bufferToken;
   if (!token) {
     return res.status(401).json({ success: false, error: 'Buffer API key is not connected.' });
   }
@@ -375,7 +408,7 @@ app.post('/api/buffer/posts', async (req, res) => {
   }
 
   const mediaRec = uploadId ? mediaRegistry.get(String(uploadId)) : undefined;
-  if (!mediaRec) {
+  if (!mediaRec || mediaRec.ownerUserId !== req.authUser!.id) {
     return res.status(400).json({
       success: false,
       error: 'Uploaded video session expired. Re-upload the video and try again.',
@@ -398,11 +431,9 @@ app.post('/api/buffer/posts', async (req, res) => {
     });
 
     if (result.success) {
-      // Keep temp media available long enough for Buffer servers to download, then delete automatically
       scheduleTempFileCleanup(mediaRec.uploadId, 6 * 60 * 60 * 1000);
-      const geminiKey = getGeminiKeyFromReq(req);
-      if (geminiKey) {
-        deleteRemoteGeminiFile(mediaRec.uploadId, geminiKey);
+      if (creds.geminiKey) {
+        deleteRemoteGeminiFile(mediaRec.uploadId, creds.geminiKey);
       }
     }
 
@@ -415,14 +446,14 @@ app.post('/api/buffer/posts', async (req, res) => {
   }
 });
 
-app.patch('/api/buffer/posts/:id', async (req, res) => {
-  const token = getBufferKeyFromReq(req);
+app.patch('/api/buffer/posts/:id', requireAuth, async (req, res) => {
+  const { bufferToken: token } = await getUserCredentials(req.authUser!.id);
   if (!token) {
     return res.status(401).json({ success: false, error: 'Buffer API key is not connected.' });
   }
 
   try {
-    const result = await updateBufferGraphQLPost(token, req.params.id, {
+    const result = await updateBufferGraphQLPost(token, String(req.params.id || ''), {
       text: req.body?.text,
       dueAt: req.body?.dueAt,
     });
@@ -435,14 +466,14 @@ app.patch('/api/buffer/posts/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/buffer/posts/:id', async (req, res) => {
-  const token = getBufferKeyFromReq(req);
+app.delete('/api/buffer/posts/:id', requireAuth, async (req, res) => {
+  const { bufferToken: token } = await getUserCredentials(req.authUser!.id);
   if (!token) {
     return res.status(401).json({ success: false, error: 'Buffer API key is not connected.' });
   }
 
   try {
-    const result = await deleteBufferGraphQLPost(token, req.params.id);
+    const result = await deleteBufferGraphQLPost(token, String(req.params.id || ''));
     return res.json(result);
   } catch (err: any) {
     return res.status(err?.statusCode || 400).json({
@@ -457,7 +488,7 @@ app.delete('/api/buffer/posts/:id', async (req, res) => {
 // ==========================================
 
 // Single-upload helper when user wants to upload a video for scheduling (e.g. manual title mode)
-app.post('/api/videos/upload', (req, res) => {
+app.post('/api/videos/upload', requireAuth, (req, res) => {
   upload.single('video')(req, res, async (uploadErr: any) => {
     if (uploadErr) {
       return res.status(uploadErr?.statusCode || 415).json({
@@ -501,6 +532,7 @@ app.post('/api/videos/upload', (req, res) => {
 
       mediaRegistry.set(uploadId, {
         uploadId,
+        ownerUserId: req.authUser!.id,
         mediaToken,
         filePath: req.file.path,
         originalName: req.file.originalname,
@@ -528,7 +560,7 @@ app.post('/api/videos/upload', (req, res) => {
 });
 
 // Upload + Real Gemini Files API Video Understanding (also supports { uploadId, regenerate })
-app.post('/api/gemini/analyze-video', (req, res) => {
+app.post('/api/gemini/analyze-video', requireAuth, (req, res) => {
   req.setTimeout(240000);
   res.setTimeout(240000);
 
@@ -591,6 +623,7 @@ app.post('/api/gemini/analyze-video', (req, res) => {
 
       mediaRegistry.set(uploadId, {
         uploadId,
+        ownerUserId: req.authUser!.id,
         mediaToken,
         filePath: req.file.path,
         originalName: req.file.originalname,
@@ -602,7 +635,7 @@ app.post('/api/gemini/analyze-video', (req, res) => {
       scheduleTempFileCleanup(uploadId, 30 * 60 * 1000);
 
       const publicVideoUrl = buildPublicMediaUrl(req, uploadId, mediaToken);
-      const geminiKey = getGeminiKeyFromReq(req);
+      const { geminiKey } = await getUserCredentials(req.authUser!.id);
 
       if (!geminiKey) {
         return res.status(401).json({
@@ -655,9 +688,9 @@ app.post('/api/gemini/analyze-video', (req, res) => {
     return;
   }
 
-  // JSON retry or regeneration using existing uploadId (never requires browser re-upload)
+  // JSON retry or regeneration using existing uploadId (verified against ownerUserId)
   (async () => {
-    const geminiKey = getGeminiKeyFromReq(req);
+    const { geminiKey } = await getUserCredentials(req.authUser!.id);
     const { uploadId, regenerate = true } = req.body || {};
 
     if (!geminiKey) {
@@ -671,7 +704,7 @@ app.post('/api/gemini/analyze-video', (req, res) => {
     }
 
     const mediaRec = uploadId ? mediaRegistry.get(String(uploadId)) : undefined;
-    if (!mediaRec) {
+    if (!mediaRec || mediaRec.ownerUserId !== req.authUser!.id) {
       return res.status(404).json({
         success: false,
         errorCode: 'VIDEO_EXPIRED',
@@ -728,6 +761,8 @@ app.get('/api/health', (_req, res) => {
 
 // Setup Vite middleware in dev or static serving in prod
 async function startServer() {
+  await initDatabase();
+
   const isProd = process.env.NODE_ENV === 'production';
   const distPath = path.join(__dirname, 'dist');
 

@@ -1,5 +1,11 @@
 import React from 'react';
-import { BufferChannel, BufferPlanTier, BufferRateLimitInfo, KeyStatus } from '../types';
+import {
+  AuthUser,
+  BufferChannel,
+  BufferPlanTier,
+  BufferRateLimitInfo,
+  KeyStatus,
+} from '../types';
 import { PlatformIcon } from './PlatformIcon';
 import {
   Upload,
@@ -14,15 +20,20 @@ import {
   ExternalLink,
   ArrowUpRight,
   RefreshCw,
+  Shield,
+  LogOut,
 } from 'lucide-react';
 
 interface SidebarProps {
+  currentUser: AuthUser;
   channels: BufferChannel[];
   selectedChannelId: string | null;
   onSelectChannel: (id: string | null) => void;
   onOpenUpload: () => void;
   onOpenKeyModal: (step?: 1 | 2) => void;
   onOpenSettings: () => void;
+  onOpenAdmin?: () => void;
+  onLogout: () => Promise<void>;
   onRefreshChannels?: () => void;
   isRefreshingChannels?: boolean;
   keyStatus: KeyStatus;
@@ -40,12 +51,15 @@ interface SidebarProps {
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
+  currentUser,
   channels,
   selectedChannelId,
   onSelectChannel,
   onOpenUpload,
   onOpenKeyModal,
   onOpenSettings,
+  onOpenAdmin,
+  onLogout,
   onRefreshChannels,
   isRefreshingChannels = false,
   keyStatus,
@@ -147,7 +161,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     ? 'text-neutral-500 hover:text-black hover:bg-neutral-200'
                     : 'text-[#737373] hover:text-white hover:bg-[#161820]'
                 }`}
-                title="Studio Settings"
+                title="Account & Studio Settings"
                 aria-label="Open Settings"
               >
                 <Settings className="w-4 h-4" />
@@ -183,7 +197,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
 
-        {/* Buffer Plan & Upgrade Row (Quiet unboxed metadata) */}
+        {/* Buffer Plan & Upgrade Row */}
         {!collapsed && (
           <div className="flex items-center justify-between gap-2 px-0.5 text-[11px]">
             <span className={`font-semibold ${activePlan.badgeClass}`}>{activePlan.label}</span>
@@ -226,9 +240,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <div className={`space-y-1 ${collapsed ? 'w-full flex flex-col items-center' : 'w-full'}`}>
           {!collapsed && (
             <div className="flex items-center justify-between px-2 pt-1 pb-1 text-[11px] font-semibold text-[#7b808c]">
-              <span className="tabular-nums">
-                Channels ({channels.length})
-              </span>
+              <span className="tabular-nums">Channels ({channels.length})</span>
               <div className="flex items-center gap-2">
                 {keyStatus.hasBufferKey && onRefreshChannels && (
                   <button
@@ -263,8 +275,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div
             className={`space-y-1 overflow-y-auto ${
               collapsed
-                ? 'max-h-[calc(100vh-240px)] flex flex-col items-center w-full'
-                : 'max-h-[calc(100vh-370px)] pr-0.5 w-full'
+                ? 'max-h-[calc(100vh-300px)] flex flex-col items-center w-full'
+                : 'max-h-[calc(100vh-430px)] pr-0.5 w-full'
             }`}
           >
             <button
@@ -385,12 +397,36 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </div>
 
-      {/* Bottom Connection Status & Links */}
+      {/* Bottom Connection Status, Admin Link & Account Bar */}
       <div
         className={`pt-3 border-t space-y-2 ${
           isLight ? 'border-neutral-200' : 'border-[#1c1e24]'
         } ${collapsed ? 'w-full flex flex-col items-center' : 'w-full'}`}
       >
+        {currentUser.role === 'admin' && onOpenAdmin && (
+          <button
+            type="button"
+            onClick={() => {
+              onOpenAdmin();
+              onCloseMobile();
+            }}
+            title="Admin Console (/admin)"
+            className={`flex items-center rounded-xl text-xs font-semibold border transition cursor-pointer ${
+              collapsed ? 'w-10 h-10 justify-center p-0' : 'w-full justify-between px-3 py-2'
+            } ${
+              isLight
+                ? 'border-neutral-300 bg-white text-neutral-900 hover:border-black'
+                : 'border-[#252832] bg-[#12141a] text-white hover:border-white/40'
+            }`}
+          >
+            <span className="flex items-center gap-2">
+              <Shield className="w-3.5 h-3.5 shrink-0" />
+              {!collapsed && <span>Admin Console</span>}
+            </span>
+            {!collapsed && <ChevronRight className="w-3.5 h-3.5 text-[#737373]" />}
+          </button>
+        )}
+
         {collapsed && (
           <button
             onClick={onOpenSettings}
@@ -399,18 +435,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 ? 'text-neutral-500 hover:text-black hover:bg-neutral-200'
                 : 'text-[#737373] hover:text-white hover:bg-[#161820]'
             }`}
-            title="Studio Settings"
+            title="Account & Studio Settings"
           >
             <Settings className="w-4 h-4" />
           </button>
         )}
 
-        {!collapsed ? (
+        {!collapsed && (
           <a
             href="https://publish.buffer.com/settings/api"
             target="_blank"
             rel="noopener noreferrer"
-            className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition ${
+            className={`w-full flex items-center justify-between px-2.5 py-1 rounded-lg text-[11px] font-medium transition ${
               isLight
                 ? 'text-neutral-600 hover:text-black hover:bg-neutral-200'
                 : 'text-[#9ea3ae] hover:text-white hover:bg-[#121419]'
@@ -419,23 +455,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <span>Manage Buffer API Key</span>
             <ExternalLink className="w-3 h-3 shrink-0" />
           </a>
-        ) : (
-          <a
-            href="https://publish.buffer.com/settings/api"
-            target="_blank"
-            rel="noopener noreferrer"
-            title="Manage Buffer API Key"
-            className={`p-2 rounded-xl transition ${
-              isLight
-                ? 'text-neutral-600 hover:text-black hover:bg-neutral-200'
-                : 'text-[#9ea3ae] hover:text-white hover:bg-[#121419]'
-            }`}
-          >
-            <ExternalLink className="w-3.5 h-3.5" />
-          </a>
         )}
 
-        {/* Compact API Connection Status Trigger */}
+        {/* API Connection Status */}
         <button
           onClick={() => {
             onOpenKeyModal(!keyStatus.hasBufferKey ? 1 : !keyStatus.hasGeminiKey ? 2 : 1);
@@ -479,6 +501,53 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
           {!collapsed && <ChevronRight className="w-3.5 h-3.5 text-[#737373] shrink-0" />}
         </button>
+
+        {/* Signed-in User Summary & Logout */}
+        {!collapsed ? (
+          <div
+            className={`pt-2 border-t flex items-center justify-between gap-2 ${
+              isLight ? 'border-neutral-200' : 'border-[#1c1e24]'
+            }`}
+          >
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="min-w-0 text-left flex-1 cursor-pointer group"
+              title="Open account settings"
+            >
+              <p className="text-xs font-semibold truncate group-hover:underline">
+                {currentUser.displayName}
+              </p>
+              <p className="text-[10px] text-[#7b808c] truncate">{currentUser.email}</p>
+            </button>
+            <button
+              type="button"
+              onClick={onLogout}
+              title="Sign out"
+              aria-label="Sign out"
+              className={`p-1.5 rounded-lg transition cursor-pointer shrink-0 ${
+                isLight
+                  ? 'text-neutral-500 hover:text-rose-600 hover:bg-rose-50'
+                  : 'text-[#8e929c] hover:text-rose-400 hover:bg-rose-500/10'
+              }`}
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={onLogout}
+            title="Sign out"
+            className={`p-2 rounded-xl transition cursor-pointer ${
+              isLight
+                ? 'text-neutral-500 hover:text-rose-600'
+                : 'text-[#8e929c] hover:text-rose-400'
+            }`}
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
+        )}
       </div>
     </div>
   );

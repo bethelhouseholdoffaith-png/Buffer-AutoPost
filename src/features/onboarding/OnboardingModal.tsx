@@ -16,12 +16,9 @@ import {
 import { BufferChannel, BufferRateLimitInfo, KeyStatus } from '../../types';
 import { LiquidGlassSurface } from '../../components/LiquidGlassSurface';
 import {
-  acceptStaticBufferMode,
   clearIntegrationKey,
   connectBufferKey,
   connectGeminiKey,
-  getRuntimeInfo,
-  testAndSaveBackendUrl,
 } from '../../services/studioApi';
 
 interface OnboardingModalProps {
@@ -61,7 +58,6 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [step, setStep] = useState<1 | 2>(resolvedDefaultStep);
   const [direction, setDirection] = useState<'left' | 'right'>('left');
 
-  // Transient form inputs ONLY (cleared immediately after each submission)
   const [bufferInput, setBufferInput] = useState('');
   const [geminiInput, setGeminiInput] = useState('');
   const [showBufferKey, setShowBufferKey] = useState(false);
@@ -71,10 +67,6 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [isClearing, setIsClearing] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const [bufferCorsBlocked, setBufferCorsBlocked] = useState(false);
-  const [backendUrlInput, setBackendUrlInput] = useState(() => getRuntimeInfo().backendUrl);
-
-  const runtimeMode = getRuntimeInfo().mode;
 
   useEffect(() => {
     if (isOpen) {
@@ -86,12 +78,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
       setShowGeminiKey(false);
       setErrorMsg(null);
       setSuccessMsg(null);
-      setBufferCorsBlocked(false);
-      setBackendUrlInput(getRuntimeInfo().backendUrl);
     }
   }, [isOpen, initialStep, keyStatus.hasBufferKey, keyStatus.hasGeminiKey]);
 
-  // Allow Escape only when dismissal is safe (not first-visit blocking)
   useEffect(() => {
     if (!isOpen || isFirstVisitBlocking || !onClose) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -116,25 +105,18 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     setIsValidating(true);
     setErrorMsg(null);
     setSuccessMsg(null);
-    setBufferCorsBlocked(false);
 
     try {
       const result = await connectBufferKey(submitted);
+      setBufferInput('');
+      setShowBufferKey(false);
 
       if (!result.success) {
-        if (result.corsBlocked) {
-          setBufferCorsBlocked(true);
-        } else {
-          setBufferInput('');
-          setShowBufferKey(false);
-        }
         setErrorMsg(result.error || 'Buffer key could not be verified. Check the key and try again.');
         setIsValidating(false);
         return;
       }
 
-      setBufferInput('');
-      setShowBufferKey(false);
       onBufferConnected({
         channels: result.channels || [],
         rateLimit: result.rateLimit,
@@ -145,67 +127,16 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
         setDirection('left');
         setStep(2);
       } else {
-        setSuccessMsg('Buffer key updated.');
+        setSuccessMsg('Buffer key encrypted and saved to your account.');
         setTimeout(() => {
           onClose?.();
-        }, 450);
+        }, 400);
       }
     } catch {
       setBufferInput('');
       setShowBufferKey(false);
       setIsValidating(false);
       setErrorMsg('Buffer key could not be verified. Check the key and try again.');
-    }
-  };
-
-  const handleContinueStaticBuffer = () => {
-    const channels = acceptStaticBufferMode(bufferInput);
-    setBufferInput('');
-    setShowBufferKey(false);
-    setBufferCorsBlocked(false);
-    setErrorMsg(null);
-    onBufferConnected({ channels });
-    if (!keyStatus.hasGeminiKey) {
-      setDirection('left');
-      setStep(2);
-    } else {
-      onClose?.();
-    }
-  };
-
-  const handleConnectBackendThenBuffer = async () => {
-    setIsValidating(true);
-    setErrorMsg(null);
-    const check = await testAndSaveBackendUrl(backendUrlInput);
-    if (!check.success) {
-      setIsValidating(false);
-      setErrorMsg(check.error || 'Could not reach Studio backend URL.');
-      return;
-    }
-    if (bufferInput.trim()) {
-      const result = await connectBufferKey(bufferInput.trim());
-      setBufferInput('');
-      setShowBufferKey(false);
-      setIsValidating(false);
-      if (!result.success) {
-        setErrorMsg(result.error || 'Buffer key could not be verified.');
-        return;
-      }
-      setBufferCorsBlocked(false);
-      onBufferConnected({
-        channels: result.channels || [],
-        rateLimit: result.rateLimit,
-      });
-      if (!keyStatus.hasGeminiKey) {
-        setDirection('left');
-        setStep(2);
-      } else {
-        onClose?.();
-      }
-    } else {
-      setIsValidating(false);
-      setBufferCorsBlocked(false);
-      setSuccessMsg('Backend server connected. Now submit your Buffer key.');
     }
   };
 
@@ -233,7 +164,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
       }
 
       setIsValidating(false);
-      setSuccessMsg('Gemini connected.');
+      setSuccessMsg('Gemini API key encrypted and saved to your account.');
       setTimeout(() => {
         onGeminiConnected();
         onClose?.();
@@ -253,9 +184,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     try {
       const updated = await clearIntegrationKey(target);
       onKeyCleared(target, updated);
-      setSuccessMsg(target === 'buffer' ? 'Buffer key cleared.' : 'Gemini key cleared.');
+      setSuccessMsg(target === 'buffer' ? 'Buffer key disconnected.' : 'Gemini key disconnected.');
     } catch {
-      setErrorMsg('Could not clear key. Please try again.');
+      setErrorMsg('Could not disconnect key. Please try again.');
     } finally {
       setIsClearing(false);
     }
@@ -299,13 +230,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="onboarding-heading"
-      className={`fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 ${
-        isFirstVisitBlocking
-          ? isLight
-            ? 'bg-[#f6f6f7]'
-            : 'bg-[#07080a]'
-          : 'bg-black/75 backdrop-blur-md'
-      }`}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-black/75 backdrop-blur-md"
     >
       <motion.div
         initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.985 }}
@@ -348,7 +273,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               </span>
             </div>
 
-            {!isFirstVisitBlocking && onClose && (
+            {onClose && (
               <button
                 type="button"
                 onClick={onClose}
@@ -394,8 +319,8 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                           isLight ? 'text-neutral-600' : 'text-[#9ea3ae]'
                         }`}
                       >
-                        Your Buffer API key lets the studio load connected channels, weekly posting
-                        schedules, and schedule video posts into your queue.
+                        Your Buffer API key lets your studio load connected channels, weekly posting
+                        schedules, and queue video posts across devices.
                       </p>
                     </div>
 
@@ -409,9 +334,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                       >
                         <span className="flex items-center gap-2 font-medium">
                           <Check className="w-3.5 h-3.5 text-emerald-500" />
-                          {runtimeMode === 'backend'
-                            ? 'Buffer key saved in HttpOnly cookie'
-                            : 'Buffer session saved locally for GitHub Pages'}
+                          <span>Buffer key encrypted on backend</span>
                         </span>
                         <button
                           type="button"
@@ -420,7 +343,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                           className="text-rose-500 hover:underline font-medium flex items-center gap-1 cursor-pointer"
                         >
                           <Trash2 className="w-3 h-3" />
-                          <span>Clear key</span>
+                          <span>Disconnect</span>
                         </button>
                       </div>
                     )}
@@ -490,58 +413,16 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                         }`}
                       >
                         <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                        <span>
-                          {runtimeMode === 'backend'
-                            ? 'Stored in an HttpOnly browser cookie. Never committed to GitHub.'
-                            : 'Static GitHub Pages mode: stored locally in your browser only.'}
-                        </span>
+                        <span>Encrypted with AES-256-GCM at rest and kept strictly on the backend.</span>
                       </p>
                     </div>
 
                     {errorMsg && (
                       <div
                         role="alert"
-                        className="text-xs text-rose-400 bg-rose-500/10 border border-rose-500/25 rounded-xl px-3.5 py-2.5 space-y-2.5"
+                        className="text-xs text-rose-400 bg-rose-500/10 border border-rose-500/25 rounded-xl px-3.5 py-2.5"
                       >
-                        <p>{errorMsg}</p>
-
-                        {bufferCorsBlocked && (
-                          <div className="space-y-2 pt-1 border-t border-rose-500/20">
-                            <div className="flex gap-1.5">
-                              <input
-                                type="url"
-                                value={backendUrlInput}
-                                onChange={(e) => setBackendUrlInput(e.target.value)}
-                                placeholder="Optional Backend Proxy URL (e.g. https://...)"
-                                className={`flex-1 px-2.5 py-1.5 rounded-lg border text-[11px] ${
-                                  isLight
-                                    ? 'border-neutral-300 bg-white text-neutral-900'
-                                    : 'border-[#2c303a] bg-[#0e1015] text-white'
-                                }`}
-                              />
-                              <button
-                                type="button"
-                                onClick={handleConnectBackendThenBuffer}
-                                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer ${
-                                  isLight ? 'bg-black text-white' : 'bg-white text-black'
-                                }`}
-                              >
-                                Use Proxy
-                              </button>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={handleContinueStaticBuffer}
-                              className={`w-full py-1.5 px-3 rounded-lg border text-[11px] font-semibold cursor-pointer ${
-                                isLight
-                                  ? 'border-neutral-300 bg-white text-neutral-900 hover:bg-neutral-50'
-                                  : 'border-[#2e323d] bg-[#14171f] text-white hover:border-white/50'
-                              }`}
-                            >
-                              Continue in Static GitHub Pages Mode (Local Schedule + Live Gemini)
-                            </button>
-                          </div>
-                        )}
+                        {errorMsg}
                       </div>
                     )}
 
@@ -553,7 +434,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                   </div>
 
                   <div className="pt-2 flex items-center justify-between gap-3">
-                    {!isFirstVisitBlocking && keyStatus.hasBufferKey ? (
+                    {!keyStatus.hasGeminiKey ? (
                       <button
                         type="button"
                         onClick={() => {
@@ -565,7 +446,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                           isLight ? 'text-neutral-600 hover:text-black' : 'text-[#9ea3ae] hover:text-white'
                         }`}
                       >
-                        <span>Gemini Step</span>
+                        <span>{keyStatus.hasBufferKey ? 'Gemini Step' : 'Skip for now'}</span>
                         <ArrowRight className="w-3.5 h-3.5" />
                       </button>
                     ) : (
@@ -636,9 +517,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                       >
                         <span className="flex items-center gap-2 font-medium">
                           <Check className="w-3.5 h-3.5 text-emerald-500" />
-                          {runtimeMode === 'backend'
-                            ? 'Gemini key saved in HttpOnly cookie'
-                            : 'Gemini key saved locally for GitHub Pages'}
+                          <span>Gemini key encrypted on backend</span>
                         </span>
                         <button
                           type="button"
@@ -647,7 +526,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                           className="text-rose-500 hover:underline font-medium flex items-center gap-1 cursor-pointer"
                         >
                           <Trash2 className="w-3 h-3" />
-                          <span>Clear key</span>
+                          <span>Disconnect</span>
                         </button>
                       </div>
                     )}
@@ -717,11 +596,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                         }`}
                       >
                         <KeyRound className="w-3.5 h-3.5 shrink-0" />
-                        <span>
-                          {runtimeMode === 'backend'
-                            ? 'Validated server-side and kept solely in your HttpOnly cookie.'
-                            : 'Static GitHub Pages mode: sent directly to Google Gemini from your browser and saved only in local browser storage.'}
-                        </span>
+                        <span>Validated server-side and encrypted in your private account vault.</span>
                       </p>
                     </div>
 
