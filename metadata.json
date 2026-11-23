@@ -1,0 +1,6 @@
+{
+  "name": "AutoBuffer Video Studio",
+  "description": "Upload videos, generate viral titles and captions with Gemini AI, and schedule posts directly to your Buffer queue in the next available spot.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
