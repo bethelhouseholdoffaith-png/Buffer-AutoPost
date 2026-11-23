@@ -15,6 +15,14 @@ import {
 } from 'lucide-react';
 import { BufferChannel, BufferRateLimitInfo, KeyStatus } from '../../types';
 import { LiquidGlassSurface } from '../../components/LiquidGlassSurface';
+import {
+  acceptStaticBufferMode,
+  clearIntegrationKey,
+  connectBufferKey,
+  connectGeminiKey,
+  getRuntimeInfo,
+  testAndSaveBackendUrl,
+} from '../../services/studioApi';
 
 interface OnboardingModalProps {
   isOpen: boolean;
@@ -63,6 +71,10 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [isClearing, setIsClearing] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [bufferCorsBlocked, setBufferCorsBlocked] = useState(false);
+  const [backendUrlInput, setBackendUrlInput] = useState(() => getRuntimeInfo().backendUrl);
+
+  const runtimeMode = getRuntimeInfo().mode;
 
   useEffect(() => {
     if (isOpen) {
@@ -74,6 +86,8 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
       setShowGeminiKey(false);
       setErrorMsg(null);
       setSuccessMsg(null);
+      setBufferCorsBlocked(false);
+      setBackendUrlInput(getRuntimeInfo().backendUrl);
     }
   }, [isOpen, initialStep, keyStatus.hasBufferKey, keyStatus.hasGeminiKey]);
 
@@ -102,32 +116,28 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     setIsValidating(true);
     setErrorMsg(null);
     setSuccessMsg(null);
+    setBufferCorsBlocked(false);
 
     try {
-      const res = await fetch('/api/keys/buffer', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Requested-With': 'AutoBuffer',
-        },
-        body: JSON.stringify({ token: submitted }),
-      });
+      const result = await connectBufferKey(submitted);
 
-      const data = await res.json();
-      // Immediately clear transient input from client state after request settles
-      setBufferInput('');
-      setShowBufferKey(false);
-
-      if (!res.ok || !data.success) {
-        setErrorMsg(data.error || 'Buffer key could not be verified. Check the key and try again.');
+      if (!result.success) {
+        if (result.corsBlocked) {
+          setBufferCorsBlocked(true);
+        } else {
+          setBufferInput('');
+          setShowBufferKey(false);
+        }
+        setErrorMsg(result.error || 'Buffer key could not be verified. Check the key and try again.');
         setIsValidating(false);
         return;
       }
 
+      setBufferInput('');
+      setShowBufferKey(false);
       onBufferConnected({
-        channels: Array.isArray(data.channels) ? data.channels : [],
-        rateLimit: data.rateLimit,
+        channels: result.channels || [],
+        rateLimit: result.rateLimit,
       });
 
       setIsValidating(false);
@@ -148,6 +158,57 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     }
   };
 
+  const handleContinueStaticBuffer = () => {
+    const channels = acceptStaticBufferMode(bufferInput);
+    setBufferInput('');
+    setShowBufferKey(false);
+    setBufferCorsBlocked(false);
+    setErrorMsg(null);
+    onBufferConnected({ channels });
+    if (!keyStatus.hasGeminiKey) {
+      setDirection('left');
+      setStep(2);
+    } else {
+      onClose?.();
+    }
+  };
+
+  const handleConnectBackendThenBuffer = async () => {
+    setIsValidating(true);
+    setErrorMsg(null);
+    const check = await testAndSaveBackendUrl(backendUrlInput);
+    if (!check.success) {
+      setIsValidating(false);
+      setErrorMsg(check.error || 'Could not reach Studio backend URL.');
+      return;
+    }
+    if (bufferInput.trim()) {
+      const result = await connectBufferKey(bufferInput.trim());
+      setBufferInput('');
+      setShowBufferKey(false);
+      setIsValidating(false);
+      if (!result.success) {
+        setErrorMsg(result.error || 'Buffer key could not be verified.');
+        return;
+      }
+      setBufferCorsBlocked(false);
+      onBufferConnected({
+        channels: result.channels || [],
+        rateLimit: result.rateLimit,
+      });
+      if (!keyStatus.hasGeminiKey) {
+        setDirection('left');
+        setStep(2);
+      } else {
+        onClose?.();
+      }
+    } else {
+      setIsValidating(false);
+      setBufferCorsBlocked(false);
+      setSuccessMsg('Backend server connected. Now submit your Buffer key.');
+    }
+  };
+
   const handleSubmitGemini = async (e: React.FormEvent) => {
     e.preventDefault();
     const submitted = geminiInput.trim();
@@ -161,23 +222,12 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     setSuccessMsg(null);
 
     try {
-      const res = await fetch('/api/keys/gemini', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Requested-With': 'AutoBuffer',
-        },
-        body: JSON.stringify({ apiKey: submitted }),
-      });
-
-      const data = await res.json();
-      // Immediately clear transient input from client state after request settles
+      const result = await connectGeminiKey(submitted);
       setGeminiInput('');
       setShowGeminiKey(false);
 
-      if (!res.ok || !data.success) {
-        setErrorMsg(data.error || 'Gemini key could not be verified. Check the key and try again.');
+      if (!result.success) {
+        setErrorMsg(result.error || 'Gemini key could not be verified. Check the key and try again.');
         setIsValidating(false);
         return;
       }
@@ -201,20 +251,8 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     setErrorMsg(null);
     setSuccessMsg(null);
     try {
-      const res = await fetch('/api/keys/clear', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Requested-With': 'AutoBuffer',
-        },
-        body: JSON.stringify({ target }),
-      });
-      const data = await res.json();
-      onKeyCleared(target, {
-        hasBufferKey: Boolean(data.hasBufferKey),
-        hasGeminiKey: Boolean(data.hasGeminiKey),
-      });
+      const updated = await clearIntegrationKey(target);
+      onKeyCleared(target, updated);
       setSuccessMsg(target === 'buffer' ? 'Buffer key cleared.' : 'Gemini key cleared.');
     } catch {
       setErrorMsg('Could not clear key. Please try again.');
@@ -371,7 +409,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                       >
                         <span className="flex items-center gap-2 font-medium">
                           <Check className="w-3.5 h-3.5 text-emerald-500" />
-                          Buffer key saved in HttpOnly cookie
+                          {runtimeMode === 'backend'
+                            ? 'Buffer key saved in HttpOnly cookie'
+                            : 'Buffer session saved locally for GitHub Pages'}
                         </span>
                         <button
                           type="button"
@@ -450,17 +490,59 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                         }`}
                       >
                         <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                        <span>Stored in an HttpOnly browser cookie. Never committed to GitHub.</span>
+                        <span>
+                          {runtimeMode === 'backend'
+                            ? 'Stored in an HttpOnly browser cookie. Never committed to GitHub.'
+                            : 'Static GitHub Pages mode: stored locally in your browser only.'}
+                        </span>
                       </p>
                     </div>
 
                     {errorMsg && (
-                      <p
+                      <div
                         role="alert"
-                        className="text-xs text-rose-400 bg-rose-500/10 border border-rose-500/25 rounded-xl px-3.5 py-2.5"
+                        className="text-xs text-rose-400 bg-rose-500/10 border border-rose-500/25 rounded-xl px-3.5 py-2.5 space-y-2.5"
                       >
-                        {errorMsg}
-                      </p>
+                        <p>{errorMsg}</p>
+
+                        {bufferCorsBlocked && (
+                          <div className="space-y-2 pt-1 border-t border-rose-500/20">
+                            <div className="flex gap-1.5">
+                              <input
+                                type="url"
+                                value={backendUrlInput}
+                                onChange={(e) => setBackendUrlInput(e.target.value)}
+                                placeholder="Optional Backend Proxy URL (e.g. https://...)"
+                                className={`flex-1 px-2.5 py-1.5 rounded-lg border text-[11px] ${
+                                  isLight
+                                    ? 'border-neutral-300 bg-white text-neutral-900'
+                                    : 'border-[#2c303a] bg-[#0e1015] text-white'
+                                }`}
+                              />
+                              <button
+                                type="button"
+                                onClick={handleConnectBackendThenBuffer}
+                                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer ${
+                                  isLight ? 'bg-black text-white' : 'bg-white text-black'
+                                }`}
+                              >
+                                Use Proxy
+                              </button>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={handleContinueStaticBuffer}
+                              className={`w-full py-1.5 px-3 rounded-lg border text-[11px] font-semibold cursor-pointer ${
+                                isLight
+                                  ? 'border-neutral-300 bg-white text-neutral-900 hover:bg-neutral-50'
+                                  : 'border-[#2e323d] bg-[#14171f] text-white hover:border-white/50'
+                              }`}
+                            >
+                              Continue in Static GitHub Pages Mode (Local Schedule + Live Gemini)
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     )}
 
                     {successMsg && (
@@ -554,7 +636,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                       >
                         <span className="flex items-center gap-2 font-medium">
                           <Check className="w-3.5 h-3.5 text-emerald-500" />
-                          Gemini key saved in HttpOnly cookie
+                          {runtimeMode === 'backend'
+                            ? 'Gemini key saved in HttpOnly cookie'
+                            : 'Gemini key saved locally for GitHub Pages'}
                         </span>
                         <button
                           type="button"
@@ -633,7 +717,11 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                         }`}
                       >
                         <KeyRound className="w-3.5 h-3.5 shrink-0" />
-                        <span>Validated server-side and kept solely in your HttpOnly cookie.</span>
+                        <span>
+                          {runtimeMode === 'backend'
+                            ? 'Validated server-side and kept solely in your HttpOnly cookie.'
+                            : 'Static GitHub Pages mode: sent directly to Google Gemini from your browser and saved only in local browser storage.'}
+                        </span>
                       </p>
                     </div>
 

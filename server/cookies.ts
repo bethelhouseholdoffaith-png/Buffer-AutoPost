@@ -87,6 +87,15 @@ export function redactSecrets(input: string, secrets: Array<string | undefined |
   return output;
 }
 
+export function getAllowedCorsOrigins(): Set<string> {
+  const raw = process.env.ALLOWED_CORS_ORIGINS || '';
+  const origins = raw
+    .split(',')
+    .map((o) => o.trim().toLowerCase().replace(/\/$/, ''))
+    .filter(Boolean);
+  return new Set(origins);
+}
+
 /**
  * CSRF & Origin protection for state-changing cookie-authenticated API routes.
  */
@@ -98,11 +107,16 @@ export function verifySameOriginCsrf(req: Request, res: Response, next: NextFunc
   const expectedHost = String(req.headers['x-forwarded-host'] || req.headers.host || '').toLowerCase();
   const originHeader = req.headers.origin;
   const requestedWith = req.headers['x-requested-with'];
+  const allowedOrigins = getAllowedCorsOrigins();
 
   if (originHeader) {
     try {
-      const originHost = new URL(originHeader).host.toLowerCase();
-      if (expectedHost && originHost !== expectedHost) {
+      const parsed = new URL(originHeader);
+      const originHost = parsed.host.toLowerCase();
+      const normalizedOrigin = `${parsed.protocol}//${originHost}`.toLowerCase();
+      const isAllowedCrossOrigin = allowedOrigins.has(normalizedOrigin);
+
+      if (expectedHost && originHost !== expectedHost && !isAllowedCrossOrigin) {
         return res.status(403).json({
           success: false,
           error: 'Cross-origin request rejected.',
@@ -115,12 +129,13 @@ export function verifySameOriginCsrf(req: Request, res: Response, next: NextFunc
       });
     }
   } else if (requestedWith !== 'AutoBuffer') {
-    // Allow standard multipart or JSON calls only if same-origin Origin header or custom header is present
     const referer = req.headers.referer;
     if (referer && expectedHost) {
       try {
-        const refHost = new URL(referer).host.toLowerCase();
-        if (refHost !== expectedHost) {
+        const refParsed = new URL(referer);
+        const refHost = refParsed.host.toLowerCase();
+        const refOrigin = `${refParsed.protocol}//${refHost}`.toLowerCase();
+        if (refHost !== expectedHost && !allowedOrigins.has(refOrigin)) {
           return res.status(403).json({ success: false, error: 'Cross-origin referer rejected.' });
         }
       } catch {

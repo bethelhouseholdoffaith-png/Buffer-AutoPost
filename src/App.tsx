@@ -14,6 +14,13 @@ import {
   KeyStatus,
 } from './types';
 import { findNextBufferSpot, getLocalDateKey } from './utils/bufferSchedule';
+import {
+  clearIntegrationKey,
+  deleteBufferPostRemote,
+  initRuntimeAndKeyStatus,
+  loadBufferBootstrap as fetchBufferBootstrap,
+  updateBufferPostRemote,
+} from './services/studioApi';
 
 const DEFAULT_SETTINGS: AppSettings = {
   appName: 'AutoBuffer',
@@ -147,24 +154,13 @@ export default function App() {
   const loadBufferBootstrap = useCallback(async (forceRefresh = false) => {
     setIsRefreshingChannels(true);
     try {
-      const url = forceRefresh
-        ? '/api/buffer/channels?refresh=true'
-        : '/api/buffer/bootstrap';
-      const res = await fetch(url, {
-        credentials: 'include',
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        if (Array.isArray(data.channels)) {
-          setChannels(data.channels);
-        }
+      const data = await fetchBufferBootstrap(forceRefresh);
+      if (data.success) {
+        setChannels(data.channels);
         if (data.rateLimit) {
           setRateLimit(data.rateLimit);
         }
-        if (data.plan) {
-          setBufferPlan(data.plan);
-        }
-      } else if (res.status === 401) {
+      } else if (data.unauthorized) {
         setKeyStatus((prev) => ({ ...prev, hasBufferKey: false }));
         setChannels([]);
       } else if (data.error) {
@@ -177,25 +173,36 @@ export default function App() {
     }
   }, []);
 
-  // Boot sequence: check HttpOnly key status first so we never flash empty dashboard before onboarding
+  // Re-detect runtime mode (backend vs static GitHub Pages) and refresh keys + channels
+  const refreshStudioSession = useCallback(async () => {
+    try {
+      const init = await initRuntimeAndKeyStatus();
+      setKeyStatus(init.keyStatus);
+      setKeyStatusLoaded(true);
+
+      if (init.keyStatus.hasBufferKey) {
+        await loadBufferBootstrap(false);
+      } else {
+        setChannels([]);
+        setRateLimit({});
+      }
+    } catch {
+      setKeyStatusLoaded(true);
+    }
+  }, [loadBufferBootstrap]);
+
+  // Boot sequence: detect backend vs static mode and load key status before showing onboarding or dashboard
   useEffect(() => {
     let active = true;
     (async () => {
       try {
-        const res = await fetch('/api/keys/status', {
-          credentials: 'include',
-        });
-        const data = await res.json();
+        const init = await initRuntimeAndKeyStatus();
         if (!active) return;
 
-        const nextStatus: KeyStatus = {
-          hasBufferKey: Boolean(data.hasBufferKey),
-          hasGeminiKey: Boolean(data.hasGeminiKey),
-        };
-        setKeyStatus(nextStatus);
+        setKeyStatus(init.keyStatus);
         setKeyStatusLoaded(true);
 
-        if (nextStatus.hasBufferKey) {
+        if (init.keyStatus.hasBufferKey) {
           await loadBufferBootstrap(false);
         }
       } catch {
@@ -279,20 +286,8 @@ export default function App() {
   };
 
   const handleClearIntegrationKey = async (target: 'buffer' | 'gemini') => {
-    const res = await fetch('/api/keys/clear', {
-      method: 'POST',
-      credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Requested-With': 'AutoBuffer',
-      },
-      body: JSON.stringify({ target }),
-    });
-    const data = await res.json();
-    handleKeyCleared(target, {
-      hasBufferKey: Boolean(data.hasBufferKey),
-      hasGeminiKey: Boolean(data.hasGeminiKey),
-    });
+    const updatedStatus = await clearIntegrationKey(target);
+    handleKeyCleared(target, updatedStatus);
   };
 
   const handleOpenUploadForDate = (dateKey: string, time?: string) => {
@@ -311,25 +306,14 @@ export default function App() {
     }
   };
 
-  // Right-click Delete Post via pure GraphQL route
+  // Right-click Delete Post via studioApi
   const handleDeletePost = async (post: ScheduledPostItem) => {
     const bufferIds = post.bufferPostIds ? Object.values(post.bufferPostIds) : [];
     setScheduledPosts((prev) => prev.filter((p) => p.id !== post.id));
 
     if (keyStatus.hasBufferKey && bufferIds.length > 0) {
       try {
-        const results = await Promise.all(
-          bufferIds.map(async (id) => {
-            const res = await fetch(`/api/buffer/posts/${encodeURIComponent(id)}`, {
-              method: 'DELETE',
-              credentials: 'include',
-              headers: {
-                'X-Requested-With': 'AutoBuffer',
-              },
-            });
-            return res.json();
-          })
-        );
+        const results = await Promise.all(bufferIds.map((id) => deleteBufferPostRemote(id)));
         const latestRate = results.find((r) => r?.rateLimit)?.rateLimit;
         if (latestRate) setRateLimit(latestRate);
       } catch {
@@ -338,7 +322,7 @@ export default function App() {
     }
   };
 
-  // Right-click Edit Post Save via pure GraphQL route
+  // Right-click Edit Post Save via studioApi
   const handleSaveEditedPost = async (updated: ScheduledPostItem) => {
     const bufferIds = updated.bufferPostIds ? Object.values(updated.bufferPostIds) : [];
 
@@ -355,26 +339,13 @@ export default function App() {
         dt.setHours(h, min, 0, 0);
       }
 
-      const res = await fetch(
-        `/api/buffer/posts/${encodeURIComponent(bufferIds[0])}`,
-        {
-          method: 'PATCH',
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Requested-With': 'AutoBuffer',
-          },
-          body: JSON.stringify({
-            text: updated.title,
-            dueAt: dt.toISOString(),
-          }),
-        }
-      );
-
-      const data = await res.json();
+      const data = await updateBufferPostRemote(bufferIds[0], {
+        text: updated.title,
+        dueAt: dt.toISOString(),
+      });
       if (data.rateLimit) setRateLimit(data.rateLimit);
 
-      if (!res.ok || !data.success) {
+      if (!data.success) {
         setAppBanner(
           data.error ||
             'Buffer GraphQL API could not update this post remotely.'
@@ -641,6 +612,7 @@ export default function App() {
             rateLimit={rateLimit}
             onOpenKeyOnboarding={handleOpenKeyModal}
             onClearIntegrationKey={handleClearIntegrationKey}
+            onRuntimeChanged={refreshStudioSession}
           />
         </motion.div>
       )}

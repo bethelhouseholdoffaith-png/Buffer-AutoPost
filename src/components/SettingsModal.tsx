@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { BufferRateLimitInfo, KeyStatus } from '../types';
 import { LiquidGlassSurface } from './LiquidGlassSurface';
+import { getRuntimeInfo, testAndSaveBackendUrl } from '../services/studioApi';
 
 export interface AppSettings {
   appName: string;
@@ -30,6 +31,7 @@ interface SettingsModalProps {
   rateLimit?: BufferRateLimitInfo;
   onOpenKeyOnboarding: (step: 1 | 2) => void;
   onClearIntegrationKey: (target: 'buffer' | 'gemini') => Promise<void>;
+  onRuntimeChanged?: () => void;
 }
 
 const AVATAR_PRESETS = [
@@ -45,6 +47,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   rateLimit = {},
   onOpenKeyOnboarding,
   onClearIntegrationKey,
+  onRuntimeChanged,
 }) => {
   const [appName, setAppName] = useState(settings.appName || 'AutoBuffer');
   const [appSubtitle, setAppSubtitle] = useState(
@@ -58,6 +61,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     Boolean(settings.liquidGlass)
   );
   const [clearingTarget, setClearingTarget] = useState<'buffer' | 'gemini' | null>(null);
+  const [backendUrlInput, setBackendUrlInput] = useState('');
+  const [backendStatusMsg, setBackendStatusMsg] = useState<string | null>(null);
+  const [isTestingBackend, setIsTestingBackend] = useState(false);
+  const runtimeInfo = getRuntimeInfo();
 
   useEffect(() => {
     if (isOpen) {
@@ -66,6 +73,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setAvatarUrl(settings.avatarUrl || '');
       setTheme(settings.theme || 'black');
       setLiquidGlass(Boolean(settings.liquidGlass));
+      setBackendUrlInput(getRuntimeInfo().backendUrl);
+      setBackendStatusMsg(null);
     }
   }, [isOpen, settings]);
 
@@ -354,7 +363,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
                 <span className="text-[11px] text-[#7b808c] flex items-center gap-1">
                   <ShieldCheck className="w-3 h-3" />
-                  HttpOnly cookies
+                  {runtimeInfo.mode === 'backend' ? 'HttpOnly cookies' : 'GitHub Pages Browser Mode'}
                 </span>
               </div>
 
@@ -457,6 +466,69 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </button>
                   )}
                 </div>
+              </div>
+
+              {/* Optional Studio Backend URL (for GitHub Pages -> Express Proxy pairing) */}
+              <div
+                className={`p-3.5 rounded-xl border space-y-2 ${
+                  isLight
+                    ? 'border-neutral-200 bg-neutral-50'
+                    : 'border-[#22242b] bg-[#111318]'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold">Studio Backend Proxy URL (Optional)</p>
+                  <span className="text-[10px] text-[#7b808c]">
+                    {runtimeInfo.mode === 'backend' ? 'Backend Active' : 'Static Browser Mode'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-[#7b808c]">
+                  When hosted on GitHub Pages, Gemini runs directly in your browser. Add a Studio backend URL here if you also want server-proxied Buffer publishing.
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="url"
+                    value={backendUrlInput}
+                    onChange={(e) => {
+                      setBackendUrlInput(e.target.value);
+                      setBackendStatusMsg(null);
+                    }}
+                    placeholder="https://your-studio-backend.example.com"
+                    className={`flex-1 px-3 py-1.5 rounded-lg border text-xs ${
+                      isLight
+                        ? 'border-neutral-300 bg-white text-neutral-900'
+                        : 'border-[#2c303a] bg-[#0c0d10] text-white'
+                    }`}
+                  />
+                  <button
+                    type="button"
+                    disabled={isTestingBackend}
+                    onClick={async () => {
+                      setIsTestingBackend(true);
+                      setBackendStatusMsg(null);
+                      const res = await testAndSaveBackendUrl(backendUrlInput);
+                      setIsTestingBackend(false);
+                      if (res.success) {
+                        setBackendStatusMsg(
+                          res.mode === 'backend'
+                            ? 'Connected to Studio backend.'
+                            : 'Cleared custom backend URL (using static mode).'
+                        );
+                        onRuntimeChanged?.();
+                      } else {
+                        setBackendStatusMsg(res.error || 'Could not reach backend URL.');
+                      }
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer ${
+                      isLight ? 'bg-black text-white' : 'bg-white text-black'
+                    }`}
+                  >
+                    {isTestingBackend ? 'Testing...' : 'Apply'}
+                  </button>
+                </div>
+                {backendStatusMsg && (
+                  <p className="text-[11px] text-[#9ea3ae]">{backendStatusMsg}</p>
+                )}
               </div>
             </div>
           </div>

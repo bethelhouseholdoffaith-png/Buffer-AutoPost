@@ -1,11 +1,32 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
+import fs from 'fs';
 import path from 'path';
-import {defineConfig} from 'vite';
+import { defineConfig } from 'vite';
+
+function githubPagesSpaFallbackPlugin() {
+  return {
+    name: 'github-pages-spa-fallback',
+    closeBundle() {
+      const distDir = path.resolve(__dirname, 'dist');
+      const indexHtml = path.join(distDir, 'index.html');
+      const notFoundHtml = path.join(distDir, '404.html');
+      const noJekyll = path.join(distDir, '.nojekyll');
+
+      if (fs.existsSync(indexHtml)) {
+        fs.copyFileSync(indexHtml, notFoundHtml);
+      }
+      if (fs.existsSync(distDir)) {
+        fs.writeFileSync(noJekyll, '');
+      }
+    },
+  };
+}
 
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss()],
+    base: './',
+    plugins: [react(), tailwindcss(), githubPagesSpaFallbackPlugin()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

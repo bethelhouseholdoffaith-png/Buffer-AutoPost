@@ -24,6 +24,12 @@ import {
 import { GreenCheckAnimation } from './GreenCheckAnimation';
 import { PlatformIcon, getPlatformDisplayName } from './PlatformIcon';
 import { LiquidGlassSurface } from './LiquidGlassSurface';
+import {
+  analyzeExistingVideo,
+  getRuntimeInfo,
+  scheduleBufferPosts,
+  uploadAndAnalyzeVideo,
+} from '../services/studioApi';
 
 interface UploadWizardModalProps {
   isOpen: boolean;
@@ -104,7 +110,6 @@ export const UploadWizardModal: React.FC<UploadWizardModalProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const activeXhrRef = useRef<XMLHttpRequest | null>(null);
-  const stageTimersRef = useRef<number[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
 
   // Title State (Editable & Preserved)
@@ -156,29 +161,10 @@ export const UploadWizardModal: React.FC<UploadWizardModalProps> = ({
     undefined
   );
 
-  const clearStageTimers = () => {
-    for (const id of stageTimersRef.current) {
-      window.clearTimeout(id);
-    }
-    stageTimersRef.current = [];
-  };
-
-  const startPostUploadStages = () => {
-    clearStageTimers();
-    setAnalysisPhase('processing');
-    stageTimersRef.current.push(
-      window.setTimeout(() => {
-        setAnalysisPhase((curr) => (curr === 'processing' ? 'analyzing' : curr));
-      }, 2200),
-      window.setTimeout(() => {
-        setAnalysisPhase((curr) => (curr === 'analyzing' ? 'generating' : curr));
-      }, 6500)
-    );
-  };
+  const [scheduledLocallyOnly, setScheduledLocallyOnly] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
-      clearStageTimers();
       setStep(1);
       setDirection('left');
       setVideoMetadata(null);
@@ -199,6 +185,7 @@ export const UploadWizardModal: React.FC<UploadWizardModalProps> = ({
       setScheduleProgress(0);
       setPostingError(null);
       setCreatedBufferIds({});
+      setScheduledLocallyOnly(false);
       setTargetChannelId(
         selectedChannelId && selectedChannelId !== 'all' ? selectedChannelId : 'all'
       );
@@ -207,7 +194,6 @@ export const UploadWizardModal: React.FC<UploadWizardModalProps> = ({
       setSelectedTime(normalizedTime);
       setScheduleMode(defaultTime ? 'custom' : 'auto');
     } else {
-      clearStageTimers();
       if (activeXhrRef.current) {
         activeXhrRef.current.abort();
         activeXhrRef.current = null;
@@ -225,8 +211,8 @@ export const UploadWizardModal: React.FC<UploadWizardModalProps> = ({
   const hasService = (keyword: string) =>
     activeChannels.some((c) => c.service.toLowerCase().includes(keyword));
 
-  // Single multipart upload using XMLHttpRequest for accurate upload byte progress
-  const handleFileSelect = (file: File) => {
+  // Upload once & analyze via studioApi (express proxy in backend mode, direct Gemini Files API in static GitHub Pages mode)
+  const handleFileSelect = async (file: File) => {
     const localUrl = URL.createObjectURL(file);
     setVideoMetadata({
       file,
@@ -239,7 +225,6 @@ export const UploadWizardModal: React.FC<UploadWizardModalProps> = ({
       localPreviewUrl: localUrl,
     });
 
-    clearStageTimers();
     setAnalysisError(null);
     setAnalysisErrorCode(null);
     setRequiresGeminiConnect(false);
@@ -251,100 +236,50 @@ export const UploadWizardModal: React.FC<UploadWizardModalProps> = ({
     setUploadByteProgress(0);
     setAnalysisPhase('uploading');
 
-    const formData = new FormData();
-    formData.append('video', file);
+    const data = await uploadAndAnalyzeVideo({
+      file,
+      hasGeminiKey: keyStatus.hasGeminiKey,
+      onUploadProgress: (pct) => setUploadByteProgress(pct),
+      onPhaseChange: (phase) => setAnalysisPhase(phase),
+      registerXhr: (xhr) => {
+        activeXhrRef.current = xhr;
+      },
+    });
 
-    const endpoint = keyStatus.hasGeminiKey
-      ? '/api/gemini/analyze-video'
-      : '/api/videos/upload';
+    if (data.uploadId) setUploadId(data.uploadId);
+    if (data.publicVideoUrl) setPublicVideoUrl(data.publicVideoUrl);
 
-    const xhr = new XMLHttpRequest();
-    activeXhrRef.current = xhr;
-    xhr.open('POST', endpoint, true);
-    xhr.withCredentials = true;
-    xhr.setRequestHeader('X-Requested-With', 'AutoBuffer');
-
-    xhr.upload.onprogress = (evt) => {
-      if (evt.lengthComputable && evt.total > 0) {
-        const pct = Math.round((evt.loaded / evt.total) * 100);
-        setUploadByteProgress(pct);
-        if (pct >= 100 && keyStatus.hasGeminiKey) {
-          startPostUploadStages();
-        }
-      }
-    };
-
-    xhr.upload.onload = () => {
-      setUploadByteProgress(100);
-      if (keyStatus.hasGeminiKey) {
-        startPostUploadStages();
-      }
-    };
-
-    xhr.onload = () => {
-      clearStageTimers();
-      activeXhrRef.current = null;
-      let data: any = {};
-      try {
-        data = JSON.parse(xhr.responseText || '{}');
-      } catch {
-        setAnalysisPhase('error');
-        setAnalysisErrorCode('TRANSIENT_ERROR');
-        setAnalysisError(
-          `Server returned an unexpected response (HTTP ${xhr.status}). Please retry.`
-        );
-        return;
-      }
-
-      if (data.uploadId) setUploadId(data.uploadId);
-      if (data.publicVideoUrl) setPublicVideoUrl(data.publicVideoUrl);
-
-      if (xhr.status >= 200 && xhr.status < 300 && data.success) {
-        if (keyStatus.hasGeminiKey && data.title) {
-          setActiveTitle(data.title);
-          setAlternatives(Array.isArray(data.alternatives) ? data.alternatives : []);
-          setContentSummary(data.content_summary || '');
-          setAnalysisPhase('ready');
-          setDirection('left');
-          setStep(2);
-        } else {
-          // Video uploaded cleanly without Gemini connected yet -> Step 2 with Connect Gemini prompt
-          setRequiresGeminiConnect(true);
-          setAnalysisErrorCode('INVALID_API_KEY');
-          setAnalysisPhase('error');
-          setAnalysisError(
-            'Gemini API key is not connected. Connect Gemini to analyze the video, or enter a manual title below.'
-          );
-          setDirection('left');
-          setStep(2);
-        }
+    if (data.success) {
+      if (keyStatus.hasGeminiKey && data.title) {
+        setActiveTitle(data.title);
+        setAlternatives(Array.isArray(data.alternatives) ? data.alternatives : []);
+        setContentSummary(data.content_summary || '');
+        setAnalysisPhase('ready');
+        setDirection('left');
+        setStep(2);
       } else {
-        const errCode = data.errorCode || 'UNKNOWN_ERROR';
-        setRequiresGeminiConnect(Boolean(data.requiresGeminiKey || !keyStatus.hasGeminiKey));
-        setAnalysisErrorCode(errCode);
+        setRequiresGeminiConnect(true);
+        setAnalysisErrorCode('INVALID_API_KEY');
         setAnalysisPhase('error');
         setAnalysisError(
-          data.error || `Gemini analysis failed (HTTP ${xhr.status}). Please retry.`
+          'Gemini API key is not connected. Connect Gemini to analyze the video, or enter a manual title below.'
         );
-        if (data.uploadId) {
-          setDirection('left');
-          setStep(2);
-        }
+        setDirection('left');
+        setStep(2);
       }
-    };
-
-    xhr.onerror = () => {
-      clearStageTimers();
-      activeXhrRef.current = null;
+    } else {
+      setRequiresGeminiConnect(Boolean(data.requiresGeminiKey || !keyStatus.hasGeminiKey));
+      setAnalysisErrorCode(data.errorCode || 'UNKNOWN_ERROR');
       setAnalysisPhase('error');
-      setAnalysisErrorCode('TRANSIENT_ERROR');
-      setAnalysisError('Network connection interrupted while uploading the video. Please try again.');
-    };
-
-    xhr.send(formData);
+      setAnalysisError(data.error || 'Gemini analysis failed. Please retry.');
+      if (data.uploadId) {
+        setDirection('left');
+        setStep(2);
+      }
+    }
   };
 
-  // Run or retry Gemini analysis using the already-uploaded video session (no browser re-upload)
+  // Run or retry Gemini analysis using the already-uploaded video session (no re-upload)
   const runExistingVideoAnalysis = async (regenerate: boolean) => {
     if (!uploadId) {
       setAnalysisErrorCode('VIDEO_EXPIRED');
@@ -363,28 +298,20 @@ export const UploadWizardModal: React.FC<UploadWizardModalProps> = ({
     setAnalysisError(null);
     setAnalysisErrorCode(null);
     setRequiresGeminiConnect(false);
-    startPostUploadStages();
+    setAnalysisPhase('processing');
 
     try {
-      const res = await fetch('/api/gemini/analyze-video', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Requested-With': 'AutoBuffer',
-        },
-        body: JSON.stringify({ uploadId, regenerate }),
+      const data = await analyzeExistingVideo({
+        uploadId,
+        regenerate,
+        onPhaseChange: (phase) => setAnalysisPhase(phase),
       });
 
-      clearStageTimers();
-      const data = await res.json();
-      if (!res.ok || !data.success || !data.title) {
+      if (!data.success || !data.title) {
         setRequiresGeminiConnect(Boolean(data.requiresGeminiKey));
         setAnalysisErrorCode(data.errorCode || 'UNKNOWN_ERROR');
         setAnalysisPhase('error');
-        setAnalysisError(
-          data.error || `Gemini analysis failed (HTTP ${res.status}). Please retry.`
-        );
+        setAnalysisError(data.error || 'Gemini analysis failed. Please retry.');
         return;
       }
 
@@ -395,7 +322,6 @@ export const UploadWizardModal: React.FC<UploadWizardModalProps> = ({
       setContentSummary(data.content_summary || '');
       setAnalysisPhase('ready');
     } catch {
-      clearStageTimers();
       setAnalysisErrorCode('TRANSIENT_ERROR');
       setAnalysisPhase('error');
       setAnalysisError('Network error communicating with Gemini service. Please retry.');
@@ -470,24 +396,16 @@ export const UploadWizardModal: React.FC<UploadWizardModalProps> = ({
       }
     }
 
-    const bufferRequestPromise = fetch('/api/buffer/posts', {
-      method: 'POST',
-      credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Requested-With': 'AutoBuffer',
-      },
-      body: JSON.stringify({
-        channelIds: targetIds,
-        channelServices,
-        text: activeTitle.trim(),
-        uploadId,
-        thumbnailOffset: thumbnailOffsetMs,
-        schedulingType: scheduleMode === 'custom' ? 'custom' : 'automatic',
-        dueAt: dueAtIso,
-        platformOptions,
-      }),
-    }).then((r) => r.json());
+    const bufferRequestPromise = scheduleBufferPosts({
+      channelIds: targetIds,
+      channelServices,
+      text: activeTitle.trim(),
+      uploadId,
+      thumbnailOffset: thumbnailOffsetMs,
+      schedulingType: scheduleMode === 'custom' ? 'custom' : 'automatic',
+      dueAt: dueAtIso,
+      platformOptions,
+    });
 
     // Exact 0.25s delay before progress advances
     setTimeout(() => {
@@ -522,6 +440,7 @@ export const UploadWizardModal: React.FC<UploadWizardModalProps> = ({
             }
             setCreatedBufferIds(idsMap);
             setLatestRateLimit(bufferData.rateLimit);
+            setScheduledLocallyOnly(Boolean(bufferData.localOnlyStatic));
 
             setTimeout(() => {
               setStep('success');
@@ -693,7 +612,9 @@ export const UploadWizardModal: React.FC<UploadWizardModalProps> = ({
                         </p>
                         <p className="text-xs text-[#8e929c]">
                           {analysisPhase === 'uploading'
-                            ? 'Transferring your video file to the studio backend.'
+                            ? getRuntimeInfo().mode === 'backend'
+                              ? 'Transferring your video file to the studio backend.'
+                              : 'Uploading directly to Gemini Files API.'
                             : analysisPhase === 'processing'
                             ? 'Waiting for Gemini Files API to mark the video ACTIVE.'
                             : analysisPhase === 'analyzing'
@@ -1546,8 +1467,15 @@ export const UploadWizardModal: React.FC<UploadWizardModalProps> = ({
                 >
                   <GreenCheckAnimation size={92} onComplete={handleAnimationComplete} />
                   <div className="space-y-1">
-                    <h3 className="text-lg font-bold tracking-tight">Scheduled in Buffer</h3>
+                    <h3 className="text-lg font-bold tracking-tight">
+                      {scheduledLocallyOnly ? 'Scheduled on Calendar' : 'Scheduled in Buffer'}
+                    </h3>
                     <p className="text-xs text-[#8e929c] max-w-xs mx-auto">"{activeTitle}"</p>
+                    {scheduledLocallyOnly && (
+                      <p className="text-[11px] text-[#7b808c] max-w-xs mx-auto">
+                        Static GitHub Pages mode: saved to your local studio calendar. Add a Studio Backend URL in Settings for remote Buffer sync.
+                      </p>
+                    )}
                   </div>
                 </motion.div>
               )}

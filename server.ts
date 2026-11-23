@@ -13,6 +13,7 @@ import {
   getBufferKeyFromReq,
   getGeminiKeyFromReq,
   verifySameOriginCsrf,
+  getAllowedCorsOrigins,
   redactSecrets,
 } from './server/cookies.js';
 import {
@@ -124,6 +125,25 @@ const upload = multer({
 
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
+
+// Optional explicit allowlisted CORS for pairing a GitHub Pages UI with a hosted Studio backend
+app.use('/api', (req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    const normalized = origin.toLowerCase().replace(/\/$/, '');
+    if (getAllowedCorsOrigins().has(normalized)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-Requested-With');
+    }
+  }
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  return next();
+});
 
 // Protect all state-changing API routes against CSRF
 app.use('/api', verifySameOriginCsrf);
