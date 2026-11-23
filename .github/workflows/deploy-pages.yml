@@ -22,6 +22,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -33,6 +36,17 @@ jobs:
 
       - name: Build static site for GitHub Pages
         run: npm run build
+
+      - name: Verify production dist output
+        run: |
+          test -f dist/index.html
+          test -f dist/404.html
+          test -f dist/.nojekyll
+          if grep -q "src/main.tsx" dist/index.html; then
+            echo "ERROR: dist/index.html still references src/main.tsx"
+            exit 1
+          fi
+          grep -E "assets/.*\.js" dist/index.html
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
@@ -48,4 +62,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
